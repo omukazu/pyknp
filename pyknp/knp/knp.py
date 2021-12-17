@@ -6,6 +6,7 @@ from __future__ import unicode_literals
 import distutils.spawn
 import os
 import unittest
+from collections import defaultdict as ddict
 
 import six
 
@@ -19,8 +20,8 @@ class KNP(object):
 
     Args:
         command (str): KNPコマンド
-        option (str): KNP解析オプション 
-                        (詳細解析結果を出力する-tabは必須。 
+        option (str): KNP解析オプション
+                        (詳細解析結果を出力する-tabは必須。
                         省略・照応解析を行う -anaphora, 格解析を行わず構文解析のみを行う -dpnd など)
         rcfile (str): KNP設定ファイルへのパス
         pattern (str): KNP出力の終端記号
@@ -89,6 +90,54 @@ class KNP(object):
         juman_str = "%s%s" % (juman_lines, self.pattern)
         return self.parse_juman_result(juman_str, juman_format)
 
+    @staticmethod
+    def lattice2juman_line(values, the_same_mrph_id):
+        features = [f'代表表記:{values[6]}']
+        features += values[17].split('|')
+        juman_values = [
+            values[5],  # midasi
+            values[7],  # yomi
+            values[8],  # genkei
+            values[9],  # hinsi
+            values[10],  # hinsi_id
+            values[11],  # bunrui
+            values[12],  # bunrui_id
+            values[13],  # katuyou
+            values[14],  # katuyou_id
+            values[15],  # katuyou2
+            values[16],  # katuyou2_id
+            f'"{" ".join(features)}"'
+        ]
+        juman_line = ' '.join(juman_values)
+        if the_same_mrph_id:
+            juman_line = '@ ' + juman_line
+        return juman_line
+
+    def lattice_all2juman_lines(self, lattice_all):
+        juman_lines = ddict(list)
+
+        comment, prev_id = '', '0'
+        for line in lattice_all.split('\n'):
+            if line.startswith('#'):
+                comment = line
+                continue
+            elif line == 'EOS':
+                continue
+            values, ranks = line.split("\t"), line.split('|')[-1].split(':')[-1]
+
+            the_same_mrph_id = (values[1] == prev_id)
+            if not the_same_mrph_id:
+                prev_id = values[1]
+
+            for rank in ranks.split(';'):
+                juman_lines[rank].append(self.lattice2juman_line(values, the_same_mrph_id))
+
+        rank2juman_lines = {
+            rank: '{0}\n{1}\nEOS'.format(comment, '\n'.join(lines)) for rank, lines in juman_lines.items()
+        }
+        juman_lines = [spec for rank, spec in sorted(rank2juman_lines.items())]
+        return juman_lines
+
     def parse_juman_result(self, juman_str, juman_format=JUMAN_FORMAT.DEFAULT):
         """
         JUMAN出力結果に対して構文解析を行い、文節列オブジェクトを返す
@@ -101,8 +150,15 @@ class KNP(object):
             BList: 文節列オブジェクト
         """
 
-        knp_lines = self.analyzer.query(juman_str, pattern=r'^%s$' % self.pattern)
-        return BList(knp_lines, self.pattern, juman_format)
+        if juman_format == JUMAN_FORMAT.LATTICE_ALL:
+            blists = []
+            for juman_lines in self.lattice_all2juman_lines(juman_str):
+                knp_lines = self.analyzer.query(juman_lines, pattern=r'^%s$' % self.pattern)
+                blists.append(BList(f'{knp_lines}EOS\n', self.pattern, JUMAN_FORMAT.DEFAULT))
+            return blists
+        else:
+            knp_lines = self.analyzer.query(juman_str, pattern=r'^%s$' % self.pattern)
+            return BList(knp_lines, self.pattern, juman_format)
 
     def reparse_knp_result(self, knp_str, juman_format=JUMAN_FORMAT.DEFAULT):
         """
